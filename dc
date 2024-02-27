@@ -2,7 +2,7 @@
 // © austint01
 
 //@version=5
-strategy("Triple EMA Trend Continuation", overlay = true, initial_capital = 100000, pyramiding = 1, max_bars_back = 5000)
+strategy("Triple EMA Trend Continuation", overlay = true, initial_capital = 100000, pyramiding = 5, max_bars_back = 5000)
 import PineCoders/Time/3
 
 input_trade_limited_range = input.bool(true, title = "Trade limited date range")
@@ -14,10 +14,11 @@ input_ema_fanning_out = input(true, "EMA fanning out (trend becoming established
 input_ema_fast = input(8, "EMA Fast")
 input_ema_mid = input(20, "EMA Mid")
 input_ema_slow = input(50, "EMA Slow")
-input_risk_to_reward = input(3.0, "Risk to Reward as a ratio of X:1")
+input_risk_to_reward = input(1.0, "Risk to Reward as a ratio of X:1")
 input_risk_account_percentage = input(1.0, "Risk percentage of account per trade")
 input_ema_fanning_threshold_days = 1
-input_pips_beyond_candle = input(10, "Pips beyond candle for stops")
+input_pips_beyond_candle = input(1, "Pips beyond candle for stops")
+input_signal_is_strong = input(true, "Signal candle is strong")
 
 GetPipSize() => syminfo.mintick * (syminfo.type == "forex" ? 10 : 1)
 GetTicketFactor() => 1 / syminfo.mintick
@@ -80,17 +81,6 @@ if input_ema_fanning_out and input_ema_fanning_threshold_days > 0
 
 can_trade := (bullish and (low <= ema_fast)) or (bearish and (high >= ema_fast))
 
-// RSI inline with trend
-
-// plot(ta.rsi(close, 20))
-// trade_towards_trend = true
-// if (bullish and (ta.rsi(close, 14) > 60)) or (bearish and (ta.rsi(close, 14) < 40))
-//     trade_towards_trend := false
-
-// Ignore open and close at same price or very close
-
-// can_trade := can_trade and open != close // and math.abs(close - open) > (4 * pip)
-
 // Open and Close within threshold
 
 // plot(candle_threshold, color = color.white, title = "candle threshold")
@@ -103,16 +93,27 @@ trade_on_friday = true
 if input_no_trade_friday and dayofweek(time) == 4 // No Friday (by excluding Thursday (4) setups)
     trade_on_friday := false
 
+// Input signal is after a retracement?
+// input_signal_after_retracement
+// input_retracement_candles_count
+
+trade_without_strong_signal = true
+
+//and ((bullish and low > low[1]) or (bearish and high < high[1])) - wick is a deeper retracement than last candle
+//and high-low < high[1]-low[1] - wick is bigger than last candle
+
+// wick is a deeper retracement than last 3 (inclusive) candles
+if input_signal_is_strong and (bullish and low > ta.lowest(3) or bearish and high < ta.highest(3)) 
+    trade_without_strong_signal := false
+
 // Can we trade or not?
 
-can_trade := can_trade and trade_trending_candles and trade_ema_fanning_out and trade_full_date_range and trade_on_friday //and trade_towards_trend
+can_trade := can_trade and trade_trending_candles and trade_ema_fanning_out and trade_full_date_range and trade_on_friday and trade_without_strong_signal
 
 // Cancel trade if not entered after signal on next bar market
 
-if ta.barssince(can_trade) == 1 and strategy.opentrades == 0
-    // strategy.cancel_all()
-    strategy.cancel("long")
-    strategy.cancel("short")
+// if ta.barssince(can_trade) == 1 and strategy.opentrades == 0
+//     strategy.cancel_all()
 
 plot(ema_fast, color = color.green)
 plot(ema_mid, color = color.orange)
@@ -120,64 +121,77 @@ plot(ema_slow, color = color.red)
 
 bgcolor(can_trade ? color.white : na)
 
-float entry_price = na
-float stop_loss_price = na
-float stop_loss = na
-float target_price = na
+var float entry_price = na
+var float stop_loss_price = na
+var float target_price = na
 
 float open_trade_stop_loss_price = na
 float open_trade_entry_price =  na
 float open_trade_entry_stop_diff = na
 float open_trade_target_price = na
 
-float sar = ta.sar(0.02, 0.02, 0.2)
-float trail_offset = (low - (sar / 2)) * 1000 // at least for JPYs. Maybe 10? for others?
+// float trailing_ema = ta.sar(0.02, 0.02, 0.2)
+float trailing_ema = ta.ema(close, 13)
 
-equity_risked = (input_risk_account_percentage / 100) * strategy.equity
-open_trade_bar_index = ta.barssince(can_trade)
+float equity_risked = (input_risk_account_percentage / 100) * strategy.equity
+int open_trade_bar_index = ta.barssince(can_trade)
 
-// if can_trade //and strategy.position_size == 0
-if bullish
-    if can_trade
+// trade entries
+
+if can_trade
+    if bullish
         stop_loss_price := low  -  (input_pips_beyond_candle * GetPipSize()) // input_pips_beyond_candle pips below low
-        entry_price := high + (2 * GetPipSize()) // 2 pips ahove high
+        entry_price := high + (input_pips_beyond_candle * GetPipSize()) // input_pips_beyond_candle pips ahove high
         entry_stop_diff = entry_price - stop_loss_price
         target_price := entry_price + (entry_stop_diff * input_risk_to_reward)
         position_size = equity_risked / entry_stop_diff
         
         strategy.entry("long", strategy.long, qty = position_size, stop = entry_price)
-        strategy.exit("long_target", from_entry = "long", qty_percent = 50, limit = target_price)
-        strategy.order("long_stop_loss", strategy.short, qty = position_size, stop = stop_loss_price)
-
-    // open_trade_stop_loss_price := low[open_trade_bar_index]  -  (input_pips_beyond_candle * GetPipSize()) // input_pips_beyond_candle pips below low
-    // open_trade_entry_price := high[open_trade_bar_index] + (2 * GetPipSize()) // 2 pips ahove high
-    // open_trade_entry_stop_diff := open_trade_entry_price - open_trade_stop_loss_price
-    // open_trade_target_price := open_trade_entry_price + (open_trade_entry_stop_diff * input_risk_to_reward)
-    // open_trade_osition_size = equity_risked / open_trade_entry_stop_diff
-    // if low > open_trade_target_price
-    //     strategy.order("long_stop_loss", strategy.short, qty = open_trade_osition_size, stop = sar)
-        // strategy.exit("long_target_trail", from_entry = "long", trail_price = open_trade_target_price, trail_offset = trail_offset * GetTicketFactor(), stop = open_trade_target_price)
- 
-if bearish
-    if can_trade
+        strategy.exit("long_tp1", from_entry = "long", qty_percent = 75, limit = target_price, stop = stop_loss_price)
+        strategy.exit("long_stop", from_entry = "long", stop = stop_loss_price)
+    else if bearish
         stop_loss_price := high  +  (input_pips_beyond_candle * GetPipSize()) // input_pips_beyond_candle pips above high
-        entry_price := low - (2 * GetPipSize()) // 2 pips below low
+        entry_price := low - (input_pips_beyond_candle * GetPipSize()) // input_pips_beyond_candle pips below low
         entry_stop_diff = stop_loss_price - entry_price
         target_price := entry_price - (entry_stop_diff * input_risk_to_reward)
         position_size = equity_risked / entry_stop_diff
 
         strategy.entry("short", strategy.short, qty = position_size, stop = entry_price)
-        strategy.exit("short_target", from_entry = "short", qty_percent = 50, limit = target_price)
-        strategy.order("short_stop_loss", strategy.long, qty = position_size, stop = stop_loss_price)
+        strategy.exit("short_tp1", from_entry = "short", qty_percent = 75, limit = target_price, stop = stop_loss_price)
+        strategy.exit("short_stop", from_entry = "short", stop = stop_loss_price)
 
-//     open_trade_stop_loss_price := high[open_trade_bar_index]  +  (input_pips_beyond_candle * GetPipSize()) // input_pips_beyond_candle pips below low
-//     open_trade_entry_price := low[open_trade_bar_index] - (2 * GetPipSize()) // 2 pips ahove high
-//     open_trade_entry_stop_diff := open_trade_stop_loss_price - open_trade_entry_price
-//     open_trade_target_price := open_trade_entry_price - (open_trade_entry_stop_diff * input_risk_to_reward)
-//     if high < open_trade_target_price
-//         strategy.exit("short_target_trail", from_entry = "short", trail_price = open_trade_target_price, trail_offset = trail_offset * GetTicketFactor(), stop = open_trade_target_price)
+//long
 
-// plot(stop_loss_price, "stop loss", color = color.aqua)
-// plot(entry_price, "entry", color = color.lime)
-// plot(target_price, "target", color = color.maroon)
-// plot(sar, "sar", color = color.gray)
+long_stop_price = 0.0
+long_stop_price := if (strategy.position_size > 0)
+    math.max(trailing_ema, long_stop_price[1], target_price)
+else
+    0
+
+if strategy.position_size > 0
+    if close[0] > target_price
+        strategy.cancel("long_stop")
+        strategy.exit("long_trailing_sl", from_entry = "long", qty_percent = 100, stop = long_stop_price)
+    else if close[0] > entry_price
+        strategy.cancel("long_stop")
+        strategy.exit("long_stop", from_entry = "long", stop = entry_price)
+
+plot(series=strategy.position_size > 0 and close[0] > target_price ? long_stop_price : na, color=color.new(#40ccfb, 0), style=plot.style_cross, linewidth=3)
+
+//short
+
+short_stop_price = 0.0
+short_stop_price := if (strategy.position_size < 0)
+    math.min(trailing_ema, short_stop_price[1], target_price)
+else
+    999999
+
+if strategy.position_size < 0
+    if close[0] < target_price
+        strategy.cancel("short_stop")
+        strategy.exit("short_trailing_sl", from_entry = "short", qty_percent = 100, stop = short_stop_price)
+    else if close[0] < entry_price
+        strategy.cancel("long_stop")
+        strategy.exit("short_stop", from_entry = "short", stop = entry_price)
+
+plot(series=strategy.position_size < 0 and close[0] < target_price ? short_stop_price : na, color=color.new(#40ccfb, 0), style=plot.style_cross, linewidth=3)
